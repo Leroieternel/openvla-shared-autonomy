@@ -154,6 +154,7 @@ wandb/
 
 openvla-7b+bridge_dataset+b1+lr-0.0005+lora-r32+dropout-0.0--image_aug/
 openvla-7b+bridge_dataset+b16+lr-0.0005+lora-r32+dropout-0.0/
+openvla-7b+bridge_dataset+b1+lr-0.0005+lora-r32+dropout-0.0/
 test_checkpoint.py
 bridge_data_robot/
 edgeml/

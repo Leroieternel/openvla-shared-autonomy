@@ -25,7 +25,8 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
 # HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
 IGNORE_INDEX = -100
-
+MAX_T = 8
+ACTION_CHUNK_SIZE = 8
 
 @dataclass
 class RLDSBatchTransform:
@@ -35,36 +36,104 @@ class RLDSBatchTransform:
     prompt_builder_fn: Type[PromptBuilder]
     predict_stop_token: bool = True
 
-    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
-        dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
-        img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
-        lang = rlds_batch["task"]["language_instruction"].decode().lower()
+    # def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
+    #     dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
+    #     img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+    #     lang = rlds_batch["task"]["language_instruction"].decode().lower()
 
-        # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
+    #     # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
+    #     prompt_builder = self.prompt_builder_fn("openvla")
+    #     conversation = [
+    #         {"from": "human", "value": f"What action should the robot take to {lang}?"},
+    #         {"from": "gpt", "value": self.action_tokenizer(action)},
+    #     ]
+    #     for turn in conversation:
+    #         prompt_builder.add_turn(turn["from"], turn["value"])
+
+    #     # Tokenize (w/ `base_tokenizer`)
+    #     input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+    #     labels = list(input_ids)
+
+    #     # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+    #     #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+    #     input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+    #     pixel_values = self.image_transform(img)
+
+    #     # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+    #     labels[: -(len(action) + 1)] = IGNORE_INDEX
+    #     if not self.predict_stop_token:
+    #         labels[-1] = IGNORE_INDEX
+
+    #     return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+
+    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+
+        dataset_name = rlds_batch["dataset_name"]
+        images_all = rlds_batch["observation"]["image_primary"]     # # (L, H, W, 3)
+        actions_all = rlds_batch["action"]
+        lang = ""
+
+        # ===== sample length =====
+        T_all = images_all.shape[0]
+        H_total = actions_all.shape[0]
+
+        if T_all < 2:
+            raise ValueError("Episode too short for multi-step modeling")
+
+
+        # ===== select frame sequence =====
+        start = np.random.randint(0, T_all - 1)     # starting point
+        max_T = T_all - start - 1             # maximum possible T_in given starting point (we need at least 1 step for H_out)
+        T_in = np.random.randint(1, max_T + 1)
+        img_seq = images_all[start : start + T_in]
+        pixel_values = torch.stack([self.image_transform(Image.fromarray(img)) for img in img_seq])  # (T_in, C, H, W)
+
+        # ===== select action chunk =====
+        max_H = T_all - (start + T_in - 1)
+        H_out = np.random.randint(1, max_H + 1)
+        action_chunk = actions_all[start + T_in - 1 : start + T_in - 1 + H_out]  # (H_out, action_dim)
+
+        # ===== action token sequences =====
+        action_tokens = [self.action_tokenizer(a) for a in action_chunk]
+        action_answer = " ".join(action_tokens)
+
+        # ===== prompt =====
         prompt_builder = self.prompt_builder_fn("openvla")
+
         conversation = [
-            {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            {"from": "gpt", "value": self.action_tokenizer(action)},
+            {"from": "human", "value": f"What action sequence should the robot take to {lang}?"},
+            {"from": "gpt", "value": action_answer},
         ]
+
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
-        # Tokenize (w/ `base_tokenizer`)
-        input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        # ===== Tokenize =====
+        prompt = prompt_builder.get_prompt()
+        input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
         labels = list(input_ids)
 
-        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-        #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
-        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
-        pixel_values = self.image_transform(img)
+        input_ids = torch.tensor(input_ids)
+        labels = torch.tensor(labels)
 
-        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        labels[: -(len(action) + 1)] = IGNORE_INDEX
+        # ===== compute action token loss =====
+        prefix_len = len(
+            self.base_tokenizer(prompt_builder.get_prompt().split(action_answer)[0],
+                                add_special_tokens=True).input_ids
+        )
+
+        labels[:prefix_len] = IGNORE_INDEX
+
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+        return dict(
+            pixel_values=pixel_values,   # (T_in, C, H, W)
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+        )
 
 
 class RLDSDataset(IterableDataset):
@@ -100,8 +169,8 @@ class RLDSDataset(IterableDataset):
         )
         rlds_config = dict(
             traj_transform_kwargs=dict(
-                window_size=1,                                      # If we wanted to feed / predict more than one step
-                future_action_window_size=0,                        # For action chunking
+                window_size=MAX_T,                                      # If we wanted to feed / predict more than one step
+                future_action_window_size=ACTION_CHUNK_SIZE,                        # For action chunking
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
             ),
