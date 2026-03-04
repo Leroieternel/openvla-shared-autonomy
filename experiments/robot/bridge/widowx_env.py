@@ -7,7 +7,7 @@ https://github.com/octo-models/octo/blob/main/examples/envs/widowx_env.py
 
 import time
 from typing import Dict
-
+import cv2
 import gym
 import numpy as np
 from pyquaternion import Quaternion
@@ -41,7 +41,11 @@ def wait_for_obs(widowx_client):
 def convert_obs(obs, im_size):
     """Preprocesses image and proprio observations."""
     # Preprocess image
-    image_obs = (obs["image"].reshape(3, im_size, im_size).transpose(1, 2, 0) * 255).astype(np.uint8)
+    # image_obs = (obs["image"].reshape(3, im_size, im_size).transpose(1, 2, 0) * 255).astype(np.uint8)
+    image = obs["image"]
+    image = cv2.resize(image, (im_size, im_size))
+    image_obs = (image * 255).astype(np.uint8)
+    print("obs['state']: ", obs["state"])
     # Add padding to proprio to match RLDS training
     proprio = np.concatenate([obs["state"][:6], [0], obs["state"][-1:]])
     return {
@@ -115,8 +119,8 @@ class WidowXGym(gym.Env):
         self.widowx_client.reset()
         self.move_to_start_state()
 
-        raw_obs = wait_for_obs(self.widowx_client)
-        obs = convert_obs(raw_obs, self.im_size)
+        raw_obs = wait_for_obs(self.widowx_client)    # (480, 640, 3)
+        obs = convert_obs(raw_obs, self.im_size)    # self.im_size: 256
 
         return obs, {}
 
