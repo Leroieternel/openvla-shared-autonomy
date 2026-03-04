@@ -37,6 +37,8 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
 from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from torch.nn.utils.rnn import pad_sequence
+from typing import List, Dict
 
 import wandb
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
@@ -70,6 +72,86 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 #     )
 #
 # # fmt: on
+
+
+class VideoPaddedCollator:
+    """
+    Collator for variable-length video inputs + text.
+    
+    Expects each sample dict to contain:
+        pixel_values: (T, C, H, W)
+        input_ids: (L,)
+        labels: (L,)
+    """
+
+    def __init__(self, pad_token_id: int):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
+
+        # ==============================
+        # Video Padding
+        # ==============================
+
+        max_T = max(sample["pixel_values"].shape[0] for sample in batch)
+
+        padded_videos = []
+        frame_masks = []
+
+        for sample in batch:
+            video = sample["pixel_values"]  # (T, C, H, W)
+            T, C, H, W = video.shape
+            pad_T = max_T - T
+
+            if pad_T > 0:
+                pad_tensor = torch.zeros(pad_T, C, H, W, dtype=video.dtype)
+                video = torch.cat([video, pad_tensor], dim=0)
+
+                mask = torch.cat([
+                    torch.ones(T, dtype=torch.long),
+                    torch.zeros(pad_T, dtype=torch.long)
+                ])
+            else:
+                mask = torch.ones(T, dtype=torch.long)
+
+            padded_videos.append(video)
+            frame_masks.append(mask)
+
+        pixel_values = torch.stack(padded_videos)      # (B, T_max, C, H, W)
+        frame_mask = torch.stack(frame_masks)          # (B, T_max)
+
+        # ==============================
+        # Text Padding
+        # ==============================
+
+        input_ids = [sample["input_ids"] for sample in batch]
+        labels = [sample["labels"] for sample in batch]
+
+        input_ids = pad_sequence(
+            input_ids,
+            batch_first=True,
+            padding_value=self.pad_token_id
+        )
+
+        labels = pad_sequence(
+            labels,
+            batch_first=True,
+            padding_value=-100   # IGNORE_INDEX
+        )
+
+        attention_mask = (input_ids != self.pad_token_id).long()
+
+        # ==============================
+        # Return Batch
+        # ==============================
+
+        return {
+            "pixel_values": pixel_values,      # (B, T_max, C, H, W)
+            "frame_mask": frame_mask,          # (B, T_max)
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        }
 
 
 @dataclass
@@ -226,9 +308,18 @@ def finetune(cfg: FinetuneConfig) -> None:
         save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
 
     # Create Collator and DataLoader
-    collator = PaddedCollatorForActionPrediction(
-        processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
-    )
+    # collator = PaddedCollatorForActionPrediction(
+    #     processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
+    # )
+
+    collator = VideoPaddedCollator(pad_token_id=processor.tokenizer.pad_token_id)
+    '''
+    pixel_values : (B, T_max, C, H, W)
+    frame_mask   : (B, T_max)
+    input_ids    : (B, L_max)
+    labels       : (B, L_max)
+    '''
+
     dataloader = DataLoader(
         vla_dataset,
         batch_size=cfg.batch_size,
