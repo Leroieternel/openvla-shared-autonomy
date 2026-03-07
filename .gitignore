@@ -158,3 +158,4 @@ openvla-7b+bridge_dataset+b1+lr-0.0005+lora-r32+dropout-0.0/
 test_checkpoint.py
 bridge_data_robot/
 edgeml/
+experiments/logs/

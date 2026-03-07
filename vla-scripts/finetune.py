@@ -141,6 +141,9 @@ class VideoPaddedCollator:
 
         attention_mask = (input_ids != self.pad_token_id).long()
 
+        ## sanity check
+        print("batch video shape:", pixel_values.shape)     # (B, T_max, C, H, W)
+
         # ==============================
         # Return Batch
         # ==============================

@@ -360,14 +360,97 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             )
 
         # === Handle Multimodal Forward ===
+        # elif (input_ids.shape[0] == pixel_values.shape[0]) or (inputs_embeds.shape[0] == pixel_values.shape[0]):
+        #     assert past_key_values is None, "Unexpected key `past_key_values` provided during language-only forward!"
+
+        #     # Visual Feature Extraction
+        #     patch_features = self.vision_backbone(pixel_values)
+
+        #     # Projection Logic =>> Update Attention Mask
+        #     projected_patch_embeddings = self.projector(patch_features)
+        #     projected_patch_attention_mask = None
+        #     if attention_mask is not None:
+        #         projected_patch_attention_mask = torch.full(
+        #             (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
+        #             fill_value=True,
+        #             dtype=attention_mask.dtype,
+        #             device=attention_mask.device,
+        #         )
+
+        #     # Get Input Embeddings (from Language Model Embeddings)
+        #     input_embeddings = self.get_input_embeddings()(input_ids)
+
+        #     # Build Multimodal Embeddings & Attention Mask =>> Prismatic defaults to inserting after <BOS> token (1:)
+        #     multimodal_embeddings = torch.cat(
+        #         [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
+        #     )
+        #     multimodal_attention_mask = None
+        #     if attention_mask is not None:
+        #         multimodal_attention_mask = torch.cat(
+        #             [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
+        #         )
+
+        #     # Build Labels (if specified) =>> Ignore Labels for Patch Embeddings
+        #     multimodal_labels = None
+        #     if labels is not None:
+        #         projected_patch_labels = torch.full(
+        #             (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
+        #             fill_value=IGNORE_INDEX,
+        #             dtype=labels.dtype,
+        #             device=labels.device,
+        #         )
+        #         multimodal_labels = torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
+
+        #     # Dispatch to Language Model
+        #     language_model_output = self.language_model(
+        #         input_ids=None,
+        #         attention_mask=multimodal_attention_mask,
+        #         position_ids=None,
+        #         past_key_values=None,
+        #         inputs_embeds=multimodal_embeddings,
+        #         labels=multimodal_labels,
+        #         use_cache=use_cache,
+        #         output_attentions=output_attentions,
+        #         output_hidden_states=output_hidden_states,
+        #         return_dict=return_dict,
+        #     )
+
         elif (input_ids.shape[0] == pixel_values.shape[0]) or (inputs_embeds.shape[0] == pixel_values.shape[0]):
+
             assert past_key_values is None, "Unexpected key `past_key_values` provided during language-only forward!"
 
-            # Visual Feature Extraction
-            patch_features = self.vision_backbone(pixel_values)
+            # ============================================================
+            # NEW: Support Video Input (B, T, C, H, W)
+            # ============================================================
+            print("before reshape:", pixel_values.shape)
+            if pixel_values.dim() == 5:
+                # video input
+                B, T, C, H, W = pixel_values.shape
 
-            # Projection Logic =>> Update Attention Mask
+                # reshape to pass through vision backbone
+                pixel_values = pixel_values.view(B * T, C, H, W)
+                print("after reshape:", pixel_values.shape)
+                # vision backbone
+                patch_features = self.vision_backbone(pixel_values)  # (B*T, Npatch, Dv)
+
+                # restore temporal structure
+                BT, Npatch, Dv = patch_features.shape
+                patch_features = patch_features.view(B, T * Npatch, Dv)
+
+            else:
+                # original single-frame behavior
+                patch_features = self.vision_backbone(pixel_values)  # (B, Npatch, Dv)
+
+            # ============================================================
+            # Project visual features to LLM space
+            # ============================================================
+
             projected_patch_embeddings = self.projector(patch_features)
+
+            # ============================================================
+            # Build attention mask for visual tokens
+            # ============================================================
+
             projected_patch_attention_mask = None
             if attention_mask is not None:
                 projected_patch_attention_mask = torch.full(
@@ -377,20 +460,40 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     device=attention_mask.device,
                 )
 
-            # Get Input Embeddings (from Language Model Embeddings)
+            # ============================================================
+            # Text embeddings
+            # ============================================================
+
             input_embeddings = self.get_input_embeddings()(input_ids)
 
-            # Build Multimodal Embeddings & Attention Mask =>> Prismatic defaults to inserting after <BOS> token (1:)
+            # ============================================================
+            # Insert visual tokens after <BOS>
+            # ============================================================
+
             multimodal_embeddings = torch.cat(
-                [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
+                [
+                    input_embeddings[:, :1, :],             # <BOS>
+                    projected_patch_embeddings,             # visual tokens
+                    input_embeddings[:, 1:, :],             # text tokens
+                ],
+                dim=1,
             )
+
             multimodal_attention_mask = None
             if attention_mask is not None:
                 multimodal_attention_mask = torch.cat(
-                    [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
+                    [
+                        attention_mask[:, :1],
+                        projected_patch_attention_mask,
+                        attention_mask[:, 1:],
+                    ],
+                    dim=1,
                 )
 
-            # Build Labels (if specified) =>> Ignore Labels for Patch Embeddings
+            # ============================================================
+            # Labels (ignore visual tokens)
+            # ============================================================
+
             multimodal_labels = None
             if labels is not None:
                 projected_patch_labels = torch.full(
@@ -399,9 +502,20 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     dtype=labels.dtype,
                     device=labels.device,
                 )
-                multimodal_labels = torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
 
-            # Dispatch to Language Model
+                multimodal_labels = torch.cat(
+                    [
+                        labels[:, :1],
+                        projected_patch_labels,
+                        labels[:, 1:],
+                    ],
+                    dim=1,
+                )
+
+            # ============================================================
+            # Forward through language model
+            # ============================================================
+
             language_model_output = self.language_model(
                 input_ids=None,
                 attention_mask=multimodal_attention_mask,

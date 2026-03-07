@@ -86,6 +86,7 @@ class RLDSBatchTransform:
         start = np.random.randint(0, T_all - 1)     # starting point
         max_T = T_all - start - 1             # maximum possible T_in given starting point (we need at least 1 step for H_out)
         T_in = np.random.randint(1, max_T + 1)
+        print("T_all:", T_all, "start:", start, "T_in:", T_in, "max_T:", max_T)
         img_seq = images_all[start : start + T_in]
         pixel_values = torch.stack([self.image_transform(Image.fromarray(img)) for img in img_seq])  # (T_in, C, H, W)
 
@@ -127,6 +128,13 @@ class RLDSBatchTransform:
 
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
+
+        ## sanity check
+        print(
+            "pixel_values:", pixel_values.shape,     # torch.Size([num_sample, 6, 224, 224])
+            "input_ids:", input_ids.shape,
+            "labels:", labels.shape
+        )
 
         return dict(
             pixel_values=pixel_values,   # (T_in, C, H, W)
