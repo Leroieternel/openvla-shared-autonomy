@@ -333,7 +333,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
-        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{exp_id}")
+        wandb.init(entity="jiaxia", project=cfg.wandb_project, name=f"ft+{exp_id}")     # exp_id: openvla-7b+bridge_dataset+b1+lr-0.0005+lora-r32+dropout-0.0
 
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
