@@ -90,6 +90,23 @@ class RLDSBatchTransform:
         img_seq = images_all[start : start + T_in]
         pixel_values = torch.stack([self.image_transform(Image.fromarray(img)) for img in img_seq])  # (T_in, C, H, W)
 
+
+        ## debug: save images
+        import imageio
+        import os
+
+        os.makedirs("debug_video", exist_ok=True)
+
+        video = []
+
+        for frame in pixel_values:
+            img = frame[:3].permute(1,2,0).cpu().numpy()  # RGB
+            img = (img - img.min()) / (img.max() - img.min() + 1e-6)
+            img = (img * 255).astype(np.uint8)
+            video.append(img)
+
+        imageio.mimsave("debug_video/sample.gif", video, fps=2)
+
         # ===== select action chunk =====
         max_H = T_all - (start + T_in - 1)
         H_out = np.random.randint(1, max_H + 1)
@@ -103,7 +120,8 @@ class RLDSBatchTransform:
         prompt_builder = self.prompt_builder_fn("openvla")
 
         conversation = [
-            {"from": "human", "value": f"What action sequence should the robot take to {lang}?"},
+            # {"from": "human", "value": f"What action sequence should the robot take to {lang}?"},
+            {"from": "human", "value": ""},     # no language instruction for now
             {"from": "gpt", "value": action_answer},
         ]
 
